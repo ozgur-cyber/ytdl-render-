@@ -17,6 +17,12 @@ app.add_middleware(
 class DownloadRequest(BaseModel):
     url: str
 
+# Aktif ve YouTube indirmeyi destekleyen en kararlı Topluluk API'leri
+COBALT_API_POOL = [
+    "https://api.cobalt.meowing.de",
+    "https://api.cobalt.canine.tools"
+]
+
 @app.get("/", response_class=HTMLResponse)
 def read_root():
     html_content = """
@@ -33,7 +39,7 @@ def read_root():
             <h1 class="text-3xl font-extrabold mb-2 bg-gradient-to-r from-red-500 to-orange-500 bg-clip-text text-transparent">
                 1080p Downloader
             </h1>
-            <p class="text-gray-400 text-sm mb-6">YouTube Video İndirme Sitesi (Kesintisiz Hızlı Sürüm)</p>
+            <p class="text-gray-400 text-sm mb-6">YouTube Video İndirme Sitesi (Ömürlük Kesintisiz Sürüm)</p>
             
             <input
                 type="text"
@@ -77,7 +83,7 @@ def read_root():
                 if(!url) return;
 
                 btn.disabled = true;
-                btn.innerText = 'Video İşleniyor (Cobalt API)...';
+                btn.innerText = 'İndirme Sunucusuna Bağlanılıyor...';
                 errorText.classList.add('hidden');
                 successBox.classList.add('hidden');
 
@@ -111,7 +117,6 @@ def read_root():
 async def download_video(request: DownloadRequest):
     video_url = request.url
 
-    cobalt_api_url = "https://api.cobalt.tools/api/json"
     payload = {
         "url": video_url,
         "videoQuality": "1080",
@@ -122,19 +127,21 @@ async def download_video(request: DownloadRequest):
         "Content-Type": "application/json"
     }
 
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(cobalt_api_url, json=payload, headers=headers, timeout=15.0)
-            
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Cobalt API şu an yanıt vermiyor.")
-            
-        result = response.json()
-        
-        if "url" in result:
-            return {"download_url": result["url"]}
-        else:
-            raise HTTPException(status_code=500, detail="Video bağlantısı çözülemedi.")
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Yedekli API Havuzunu sırayla deneyen mekanizma
+    async with httpx.AsyncClient() as client:
+        for api_url in COBALT_API_POOL:
+            try:
+                response = await client.post(api_url, json=payload, headers=headers, timeout=10.0)
+                if response.status_code == 200:
+                    result = response.json()
+                    if "url" in result:
+                        return {"download_url": result["url"]}
+            except Exception:
+                # Eğer denenen topluluk sunucusu kapalıysa veya hata verdiyse sessizce sıradakine geç
+                continue
+
+    # Havuzdaki hiçbir sunucu yanıt vermezse hata fırlatır
+    raise HTTPException(
+        status_code=500, 
+        detail="Şu an tüm yedek indirme sunucuları yoğun. Lütfen 10 saniye sonra tekrar deneyin."
+    )
