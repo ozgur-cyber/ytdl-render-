@@ -1,9 +1,12 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import httpx
 
 app = FastAPI()
 
+# CORS engellerini tamamen kaldırıyoruz
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,9 +15,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class DownloadRequest(BaseModel):
+    url: str
+
 @app.get("/", response_class=HTMLResponse)
 def read_root():
-    html_content = """
+    return """
     <!DOCTYPE html>
     <html lang="tr">
     <head>
@@ -28,7 +34,7 @@ def read_root():
             <h1 class="text-3xl font-extrabold mb-2 bg-gradient-to-r from-red-500 to-orange-500 bg-clip-text text-transparent">
                 1080p Downloader
             </h1>
-            <p class="text-gray-400 text-sm mb-6">YouTube Video İndirme Sitesi (Merkeziyetsiz Hızlı Sürüm)</p>
+            <p class="text-gray-400 text-sm mb-6">YouTube Video İndirme Sitesi (Köprü Sunucu Sürümü)</p>
             
             <input
                 type="text"
@@ -48,12 +54,12 @@ def read_root():
             <p id="errorText" class="text-red-500 mt-4 text-sm hidden"></p>
 
             <div id="successBox" class="mt-6 p-4 bg-gray-850 rounded-xl border border-green-900/30 hidden">
-                <p class="text-green-400 text-sm mb-3">Videonuz Başarıyla Hazırlandı!</p>
+                <p class="text-green-400 text-sm mb-3 font-semibold">Videonuz Başarıyla Hazırlandı!</p>
                 <a
                     id="downloadLink"
                     href="#"
                     target="_blank"
-                    class="inline-block w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-xl transition text-center"
+                    class="inline-block w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-xl transition text-center shadow-lg"
                 >
                     Tarayıcıda Aç ve İndir (.MP4)
                 </a>
@@ -72,51 +78,31 @@ def read_root():
                 if(!url) return;
 
                 btn.disabled = true;
-                btn.innerText = 'Bağlantı Çözülüyor (Tarayıcı Üzerinden)...';
+                btn.innerText = 'Bağlantı Çözülüyor (Köprü Kuruluyor)...';
                 errorText.classList.add('hidden');
                 successBox.classList.add('hidden');
 
-                // Tarayıcının doğrudan sorgulayacağı en stabil topluluk sunucuları ve endpointleri
-                const apiPool = [
-                    "https://api.cobalt.meowing.de",
-                    "https://cobalt.canine.tools",
-                    "https://api.cobalt.meowing.de/api/json",
-                    "https://cobalt.canine.tools/api/json"
-                ];
+                try {
+                    // Kendi backend API'mize (Render sunucumuza) güvenli istek atıyoruz (CORS engeli yok!)
+                    const response = await fetch('/api/download', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ url: url })
+                    });
 
-                let success = false;
+                    const data = await response.json();
 
-                for (const apiUrl of apiPool) {
-                    try {
-                        const response = await fetch(apiUrl, {
-                            method: 'POST',
-                            headers: {
-                                'Accept': 'application/json',
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                url: url,
-                                videoQuality: "1080",
-                                downloadMode: "auto"
-                            })
-                        });
-
-                        if (response.ok) {
-                            const data = await response.json();
-                            if (data && data.url) {
-                                downloadLink.href = data.url;
-                                successBox.classList.remove('hidden');
-                                success = true;
-                                break; 
-                            }
-                        }
-                    } catch (err) {
-                        console.log(apiUrl + " denemesi başarısız oldu, sıradakine geçiliyor.");
+                    if (response.ok && data.url) {
+                        downloadLink.href = data.url;
+                        successBox.classList.remove('hidden');
+                    } else {
+                        errorText.innerText = data.detail || "Video indirme linki oluşturulamadı. Lütfen başka bir video deneyin.";
+                        errorText.classList.remove('hidden');
                     }
-                }
-
-                if (!success) {
-                    errorText.innerText = "Tüm yedek sunucular şu an yoğun veya bu video kısıtlanmış. Lütfen biraz sonra tekrar deneyin.";
+                } catch (err) {
+                    errorText.innerText = "Sunucu bağlantısı başarısız oldu. Lütfen internetinizi kontrol edin.";
                     errorText.classList.remove('hidden');
                 }
 
@@ -127,4 +113,35 @@ def read_root():
     </body>
     </html>
     """
-    return HTMLResponse(content=html_content, status_code=200)
+
+@app.post("/api/download")
+async def proxy_download(request: DownloadRequest):
+    # Arka planda CORS engeline takılmadan sorgulayacağımız en kararlı API havuzu
+    api_pool = [
+        "https://api.cobalt.meowing.de",
+        "https://cobalt.canine.tools",
+    ]
+    
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "url": request.url,
+        "videoQuality": "1080",
+        "downloadMode": "auto"
+    }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for api_url in api_pool:
+            try {
+                response = await client.post(api_url, json=payload, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("url"):
+                        return {"url": data["url"]}
+            except Exception as e:
+                continue
+                
+    raise HTTPException(status_code=500, detail="Tüm yedek sunucular şu an yoğun veya bu video kısıtlanmış. Lütfen az sonra tekrar deneyin.")
