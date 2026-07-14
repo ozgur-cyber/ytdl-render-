@@ -1,7 +1,12 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import yt_dlp
+import os
+import uuid
+import time
 import httpx
 
 app = FastAPI()
@@ -14,14 +19,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+os.makedirs("static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 class DownloadRequest(BaseModel):
     url: str
 
-# Aktif ve YouTube indirmeyi destekleyen en kararlı Topluluk API'leri
-COBALT_API_POOL = [
-    "https://api.cobalt.meowing.de",
-    "https://api.cobalt.canine.tools"
-]
+def cleanup_old_files():
+    now = time.time()
+    for filename in os.listdir("static"):
+        filepath = os.path.join("static", filename)
+        if os.stat(filepath).st_mtime < now - 600: # 10 dakika
+            try:
+                os.remove(filepath)
+            except:
+                pass
 
 @app.get("/", response_class=HTMLResponse)
 def read_root():
@@ -39,7 +51,7 @@ def read_root():
             <h1 class="text-3xl font-extrabold mb-2 bg-gradient-to-r from-red-500 to-orange-500 bg-clip-text text-transparent">
                 1080p Downloader
             </h1>
-            <p class="text-gray-400 text-sm mb-6">YouTube Video İndirme Sitesi (Ömürlük Kesintisiz Sürüm)</p>
+            <p class="text-gray-400 text-sm mb-6">YouTube Video İndirme Sitesi (Süper Hibrit Sürüm)</p>
             
             <input
                 type="text"
@@ -83,7 +95,7 @@ def read_root():
                 if(!url) return;
 
                 btn.disabled = true;
-                btn.innerText = 'İndirme Sunucusuna Bağlanılıyor...';
+                btn.innerText = 'Video Hazırlanıyor (30-60 Saniye Sürebilir)...';
                 errorText.classList.add('hidden');
                 successBox.classList.add('hidden');
 
@@ -114,9 +126,45 @@ def read_root():
     return HTMLResponse(content=html_content, status_code=200)
 
 @app.post("/download")
-async def download_video(request: DownloadRequest):
+async def download_video(request: DownloadRequest, background_tasks: BackgroundTasks):
+    background_tasks.add_task(cleanup_old_files)
     video_url = request.url
+    file_id = str(uuid.uuid4())
+    output_filename = f"static/{file_id}.mp4"
+    output_template = f"static/{file_id}.%(ext)s"
 
+    # YÖNTEM 1: Safari/iOS Taklidi ile Doğrudan yt-dlp Kullanımı (Engelleri Aşar)
+    ydl_opts = {
+        'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+        'merge_output_format': 'mp4',
+        'outtmpl': output_template,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'web_safari'] # Sihirli taklit parametreleri
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+        }
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+        
+        if os.path.exists(output_filename):
+            return {"download_url": f"/static/{file_id}.mp4"}
+    except Exception as direct_err:
+        print(f"Dogrudan indirme basarisiz oldu: {direct_err}. Yedek Cobalt sunuculari deneniyor...")
+
+    # YÖNTEM 2: Üstteki yöntem başarısız olursa yedekli Cobalt havuzunu dene
+    COBALT_API_POOL = [
+        "https://api.cobalt.meowing.de/",
+        "https://api.cobalt.canine.tools/"
+    ]
+    
     payload = {
         "url": video_url,
         "videoQuality": "1080",
@@ -127,21 +175,19 @@ async def download_video(request: DownloadRequest):
         "Content-Type": "application/json"
     }
 
-    # Yedekli API Havuzunu sırayla deneyen mekanizma
     async with httpx.AsyncClient() as client:
         for api_url in COBALT_API_POOL:
             try:
-                response = await client.post(api_url, json=payload, headers=headers, timeout=10.0)
+                response = await client.post(api_url, json=payload, headers=headers, timeout=12.0)
                 if response.status_code == 200:
                     result = response.json()
                     if "url" in result:
                         return {"download_url": result["url"]}
-            except Exception:
-                # Eğer denenen topluluk sunucusu kapalıysa veya hata verdiyse sessizce sıradakine geç
+            except Exception as cobalt_err:
+                print(f"Cobalt sunucusu hata verdi ({api_url}): {cobalt_err}")
                 continue
 
-    # Havuzdaki hiçbir sunucu yanıt vermezse hata fırlatır
     raise HTTPException(
         status_code=500, 
-        detail="Şu an tüm yedek indirme sunucuları yoğun. Lütfen 10 saniye sonra tekrar deneyin."
+        detail="Şu an tüm indirme yöntemleri YouTube engeline takıldı. Lütfen birkaç dakika sonra tekrar deneyin."
     )
