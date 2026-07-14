@@ -1,12 +1,8 @@
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import yt_dlp
-import os
-import uuid
-import time
+import httpx
 
 app = FastAPI()
 
@@ -18,23 +14,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-os.makedirs("static", exist_ok=True)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
 class DownloadRequest(BaseModel):
     url: str
 
-def cleanup_old_files():
-    now = time.time()
-    for filename in os.listdir("static"):
-        filepath = os.path.join("static", filename)
-        if os.stat(filepath).st_mtime < now - 600: # 10 dakika
-            try:
-                os.remove(filepath)
-            except:
-                pass
-
-# Web sitemizin şık arayüzü doğrudan bu adreste açılacak
 @app.get("/", response_class=HTMLResponse)
 def read_root():
     html_content = """
@@ -43,7 +25,7 @@ def read_root():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>1080p Video Downloader - Lokal Test</title>
+        <title>1080p Video Downloader</title>
         <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-gray-950 text-white flex flex-col items-center justify-center min-h-screen p-4">
@@ -51,7 +33,7 @@ def read_root():
             <h1 class="text-3xl font-extrabold mb-2 bg-gradient-to-r from-red-500 to-orange-500 bg-clip-text text-transparent">
                 1080p Downloader
             </h1>
-            <p class="text-gray-400 text-sm mb-6">YouTube Video İndirme Sitesi (Lokal Test)</p>
+            <p class="text-gray-400 text-sm mb-6">YouTube Video İndirme Sitesi (Kesintisiz Hızlı Sürüm)</p>
             
             <input
                 type="text"
@@ -75,10 +57,10 @@ def read_root():
                 <a
                     id="downloadLink"
                     href="#"
-                    download="video.mp4"
+                    target="_blank"
                     class="inline-block w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-xl transition text-center"
                 >
-                    Cihaza Kaydet (.MP4)
+                    Tarayıcıda Aç ve İndir (.MP4)
                 </a>
             </div>
         </div>
@@ -95,7 +77,7 @@ def read_root():
                 if(!url) return;
 
                 btn.disabled = true;
-                btn.innerText = 'Video İşleniyor (FFmpeg)...';
+                btn.innerText = 'Video İşleniyor (Cobalt API)...';
                 errorText.classList.add('hidden');
                 successBox.classList.add('hidden');
 
@@ -126,27 +108,33 @@ def read_root():
     return HTMLResponse(content=html_content, status_code=200)
 
 @app.post("/download")
-def download_video(request: DownloadRequest, background_tasks: BackgroundTasks):
-    background_tasks.add_task(cleanup_old_files)
-    
+async def download_video(request: DownloadRequest):
     video_url = request.url
-    file_id = str(uuid.uuid4())
-    output_filename = f"static/{file_id}.mp4"
-    output_template = f"static/{file_id}.%(ext)s"
 
-    ydl_opts = {
-        'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-        'merge_output_format': 'mp4',
-        'outtmpl': output_template,
+    cobalt_api_url = "https://api.cobalt.tools/api/json"
+    payload = {
+        "url": video_url,
+        "videoQuality": "1080",
+        "downloadMode": "auto"
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+        async with httpx.AsyncClient() as client:
+            response = await client.post(cobalt_api_url, json=payload, headers=headers, timeout=15.0)
+            
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Cobalt API şu an yanıt vermiyor.")
+            
+        result = response.json()
         
-        if not os.path.exists(output_filename):
-            raise HTTPException(status_code=500, detail="Video işlenirken bir hata oluştu.")
-
-        return {"download_url": f"/static/{file_id}.mp4"}
+        if "url" in result:
+            return {"download_url": result["url"]}
+        else:
+            raise HTTPException(status_code=500, detail="Video bağlantısı çözülemedi.")
+            
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
